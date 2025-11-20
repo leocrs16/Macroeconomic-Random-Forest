@@ -1,0 +1,324 @@
+#Instalar devtools
+if (!require("devtools")) {
+  install.packages("devtools")
+}
+library(devtools)
+
+#Instalar pacote do MRF
+install_github("philgoucou/macrorf")
+library(MacroRF)
+
+#Carregando bibliotecas
+library(readr)
+library(dplyr)
+library(tidyr)
+library(zoo)
+library(ggplot2)
+
+#Carregar os datasets
+fredqd <- read_csv("FREDQD_2019.csv")
+View(fredqd)
+apendice <- read_csv("FREDQD_appendix.csv")
+
+#Aplicar transformações no tcode
+series_transformadas <- function(x, code){
+  switch(tcode,
+         "1"= { return(x) },
+         # tcode 2: Primeira diferença
+         "2" = { return(c(NA, diff(x))) },
+         # tcode 3: Segunda diferença
+         "3" = { return(c(NA, NA, diff(x, differences = 2))) },
+         # tcode 4: Log
+         "4" = { return(log(x)) },
+         # tcode 5: Primeira diferença do log
+         "5" = { return(c(NA, diff(log(x)))) },
+         # tcode 6: Segunda diferença do log
+         "6" = { return(c(NA, NA, diff(log(x), differences = 2))) },
+         # tcode 7: Diferença da taxa de crescimento
+         "7" = {
+           growth_rate <- x / lag(x) - 1
+           return(c(NA, NA, diff(growth_rate)))
+         },
+         # Default
+         { return(x) }
+  )
+}
+
+#Renomear primeira coluna para data e formatar
+fredqd_transf <- fredqd %>%
+  rename(date = 1) %>%
+  mutate(date = as.Date(date, format = "%m/%d/%Y"))
+names(fredqd)
+names(fredqd_transf)
+View(fredqd_transf)
+
+ # Extrair os nomes das séries e os seus tcodes
+names(apendice)
+View(apendice)
+series <- apendice$`FRED MNEMONIC`
+codigos <- apendice$TCODE
+View(codigos)
+series %in% colnames(fredqd_transf)
+colnames(fredqd_transf) %in% series
+
+codigos <- as.data.frame(fredqd_transf[c(1, 2), ])
+rownames(codigos) <- c('factors', 'transform')
+View(codigos)
+
+# Remover as linhas iniciais com NAs resultantes das transformações
+fredqd_transf <- fredqd_transf %>%
+  filter(date >= as.Date("1960-01-01")) # O artigo começa a análise mais tarde
+
+View(fredqd_transf)
+fredqd_transf[, 179]
+
+#Retirar colunas com NA
+fred_NA <- which(is.na(fredqd_transf), arr.ind = TRUE)
+col_excl <- names(table(fred_NA[, 2])) %>% as.numeric()
+fredqd_limpo_date <- fredqd_transf[, -col_excl]
+View(fredqd_limpo_date)
+
+#Retirar data
+fredqd_limpo <- fredqd_limpo_date[, -1]
+View(fredqd_limpo)
+dim(fredqd_limpo)
+
+# Realizar a Análise de Componentes Principais (PCA)
+pca_resultado <- prcomp(fredqd_limpo, center = TRUE, scale. = TRUE)
+View(pca_resultado)
+
+# Extrair os primeiros 5 fatores (como no artigo)
+factors <- as.data.frame(pca_resultado$x[, 1:5])
+names(factors) <- paste0("F", 1:ncol(factors))
+View(factors)
+
+#Definir parâmetros e preparar dados
+
+# 1) Conforme o artigo, precisamos de 8 defasagens para os fatores
+n_lags_fatores <- 8
+
+# Converter data frame "factors" para matriz (F1 a F5)
+factors_matrix <- as.matrix(factors)
+factor_names <- colnames(factors_matrix)
+View(factors_matrix)
+
+# Seguindo a lógica: para 'n' defasagens, usamos embed(dados, n + 1).
+# Para 8 defasagens, usamos embed(dados, 9).
+embedded_factors <- embed(factors_matrix, n_lags_fatores + 1)
+
+# A função embed() ordena as colunas da defasagem mais distante para a mais recente.
+# Vamos criar os nomes nessa ordem (de lag8, lag7,..., até lag0).
+col_names <- as.vector(sapply(0:n_lags_fatores, function(lag) {
+  paste0(factor_names, "_lag", lag)
+  }))
+
+# Atribuir os nomes à nossa matriz de fatores defasados
+colnames(embedded_factors) <- col_names
+View(embedded_factors)
+
+# Converter a matriz de volta para um data frame
+fatores_lags_df <- as.data.frame(embedded_factors)
+
+# A matriz de estado S_t usa apenas informações passadas.
+# Portanto, vamos remover as colunas de "lag 0" (que são os valores atuais).
+fatores_lags_df <- fatores_lags_df %>%
+  select(-ends_with("_lag0"))
+
+#O data frame 'factors_lags_df' agora contém 40 colunas (8 defasagens para cada um dos 5 fatores).
+# Ele terá 8 linhas a menos que o data frame 'factors' original.
+cat("Dimensões do data frame de fatores defasados:", dim(fatores_lags_df), "\n\n")
+cat("Visualização das primeiras colunas:\n")
+print(head(fatores_lags_df[, 1:6], 5))
+
+#>>>>>>>>> 2) Oito defasagens da variável dependente (y_t) <<<<<<<<<<<<
+# É crucial usar a série antes da limpeza de NAs para manter o alinhamento temporal.
+# O artigo aplica transformações para estacionariedade nas variáveis alvo.
+# Para o desemprego (UR), a transformação é a primeira diferença do log.
+
+# Selecionar a série 'UNRATE' e aplicar a transformação
+y_serie_unrate <- fredqd_transf$UNRATE
+y_transf_unrate <- c(NA, diff(log(y_serie_unrate)))
+
+# O nome 'y_t' é genérico; vamos nomear o objeto de forma mais específica.
+y_df <- data.frame(UNRATE_logdiff = y_transf_unrate)
+
+# Definir o número de defasagens
+n_lags_y <- 8
+
+# Criar a matriz de defasagens usando embed().
+# Para 'n' defasagens, usamos embed(dados, n + 1).
+# A função embed() remove automaticamente as linhas iniciais com NAs.
+embedded_y <- embed(y_df$UNRATE_logdiff, n_lags_y + 1)
+
+# A função embed() ordena as colunas da defasagem mais distante para a mais recente.
+# Vamos remover a coluna de "lag 0" (valor atual) e nomear as colunas restantes.
+y_lags_matrix <- embedded_y[, -1] # Remove a primeira coluna, que é y_t (lag 0)
+
+# Criar nomes de colunas de y_lag1 a y_lag8
+colnames(y_lags_matrix) <- paste0("UNRATE_lag", 1:n_lags_y)
+
+# Converter para data frame
+y_lags_df <- as.data.frame(y_lags_matrix)
+
+# Verificação
+cat("Dimensões do data frame de defasagens de y_t:", dim(y_lags_df), "\n\n")
+print(head(y_lags_df))
+
+#>>>>>>>>> 3) Tendência temporal (t) <<<<<<<<<<<<
+# A tendência deve ter o mesmo número de linhas que o data frame original
+# antes da criação das defasagens, ou seja, 'fredqd_transf'.
+n_obs_total <- nrow(fredqd_transf)
+
+#Criar o data frame da tendência
+trend_df <- data.frame(t = 1:n_obs_total)
+
+# Verificação
+cat("Dimensões do data frame da tendência:", dim(trend_df), "\n")
+cat("Últimos valores da tendência:\n")
+print(tail(trend_df))
+cat("\n")
+
+
+#>>>>>>>> 3) Duas defasagens de CADA variável em fredqd_limpo <<<<<<<<<<<<<<
+
+# Definir o número de defasagens
+n_lags_fredqd <- 2
+
+# Criar o data frame de defasagens
+# A função across() aplica a mesma transformação a múltiplas colunas.
+# A função lag() cria uma versão defasada de um vetor.
+# O argumento.names formata os nomes das novas colunas.
+fredqd_lags_df <- fredqd_limpo %>%
+  mutate(across(
+    .cols = everything(),
+    .fns = list(
+      lag1 = ~lag(., n = 1),
+      lag2 = ~lag(., n = 2)
+    ),
+    .names = "{.col}_{.fn}"
+  ))
+# O data frame resultante agora contém as colunas originais E as defasadas.
+# Para o vetor S_t, precisamos APENAS das colunas defasadas.
+fredqd_lags_df <- fredqd_lags_df %>%
+  select(ends_with("_lag1"), ends_with("_lag2"))
+
+#Verificação
+cat("Dimensões do data frame de defasagens de todas variáveis:", dim(fredqd_lags_df), "\n\n")
+cat("Visualização das primeiras colunas:\n")
+print(head(fredqd_lags_df[, 1:6]))
+View(fredqd_lags_df)
+
+#>>>>>>>>>>>>>> Dois MAFs para cada variável j <<<<<<<<<<<<<<<
+
+# Conforme o artigo (Tabela 1 e Seção 2.6), esta etapa comprime a 
+# informação polinomial de defasagem de cada variável individualmente.
+
+# Definir parâmetros conforme o artigo
+n_lags_maf <- 8
+n_maf_components <- 2
+
+# 1. Criar uma lista vazia para armazenar os MAFs de cada variável
+maf_list <- list()
+
+# 2. Iterar sobre cada coluna (variável j) do seu data frame limpo
+cat("Iniciando cálculo dos MAFs para cada variável...\n")
+for (var_name in colnames(fredqd_limpo)) {
+  
+  # 3. Extrair a série temporal da variável j
+  # Usamos [[var_name]] para extrair como um vetor
+  serie_j <- fredqd_limpo[[var_name]]
+  View(serie_j)
+  # 4. Criar a matriz de 8 defasagens (P=8)
+  # Assim como para y_t, usamos embed() com n_lags + 1
+  # Isso cria uma matriz onde cada linha é (y_t, y_t-1, ..., y_t-8)
+  embedded_j <- embed(serie_j, n_lags_maf + 1)
+  
+  # 5. Isolar APENAS as defasagens
+  # Removemos a primeira coluna (que é o lag 0, ou o valor atual)
+  lags_j_matrix <- embedded_j[, -1] 
+  
+  # 6. Rodar o PCA sobre a matriz de 8 defasagens da variável j
+  # O seu fredqd_limpo já foi tratado para NAs, então prcomp deve rodar sem erros.
+  pca_j <- prcomp(lags_j_matrix, center = TRUE, scale. = TRUE)
+  
+  # 7. Extrair os 2 primeiros componentes (MAFs)
+  # pca_j$x contém os componentes principais
+  mafs_j <- pca_j$x[, 1:n_maf_components]
+  
+  # 8. Renomear as colunas para evitar conflitos e para identificação
+  colnames(mafs_j) <- c(paste0(var_name, "_MAF1"), paste0(var_name, "_MAF2"))
+  
+  # 9. Adicionar o data frame de 2 colunas à nossa lista
+  maf_list[[var_name]] <- mafs_j
+}
+cat("Cálculo dos MAFs concluído.\n")
+
+# 10. Combinar todos os data frames da lista em um único data frame
+# do.call(cbind, ...) é a forma mais eficiente de juntar todos os 
+# data frames de MAFs lado a lado.
+mafs_df <- do.call(cbind, maf_list)
+
+# Converter para data frame (do.call(cbind,...) pode retornar uma matriz)
+mafs_df <- as.data.frame(mafs_df)
+
+# Verificação
+cat("\nDimensões do data frame de MAFs:", dim(mafs_df), "\n")
+# O número de colunas deve ser (nº de colunas em fredqd_limpo) * 2
+cat("Número de colunas esperado:", ncol(fredqd_limpo) * n_maf_components, "\n")
+cat("Visualização das primeiras colunas de MAF:\n")
+print(head(mafs_df[, 1:6], 5))
+
+
+# >>>>>>>>>>>> ALINHAMENTO FINAL E MONTAGEM DO S_t <<<<<<<<<<<<<<<
+
+# Agora, precisamos juntar os 5 componentes
+
+# Componentes com (T - 8) linhas (pois usam 8 defasagens com embed()):
+# 1. fatores_lags_df
+# 2. y_lags_df
+# 3. mafs_df (o que acabamos de criar)
+
+# Componentes com T linhas (comprimento total):
+# 4. trend_df
+# 5. fredqd_lags_df (criado com dplyr::lag, que preenche com NAs)
+
+# Precisamos alinhar tudo, removendo as 8 primeiras linhas dos 
+# componentes de T linhas para que correspondam aos de (T - 8) linhas.
+
+n_obs_total <- nrow(trend_df)
+n_obs_lags <- nrow(mafs_df) # Todos os dfs com embed() têm esse n_obs
+n_remover <- n_obs_total - n_obs_lags # Deve ser 8
+
+cat("\nTotal de observações a remover para alinhamento:", n_remover, "\n")
+
+# Alinhar trend_df
+trend_df_alinhado <- trend_df %>% 
+  slice((n_remover + 1):n())
+
+# Alinhar fredqd_lags_df (que tem NAs nas primeiras linhas)
+fredqd_lags_df_alinhado <- fredqd_lags_df %>% 
+  slice((n_remover + 1):n())
+
+# Verificar se todas as dimensões de linhas agora batem
+cat("Dimensões S_t (Fatores):", dim(fatores_lags_df), "\n")
+cat("Dimensões S_t (y_t):", dim(y_lags_df), "\n")
+cat("Dimensões S_t (Trend):", dim(trend_df_alinhado), "\n")
+cat("Dimensões S_t (FRED Lags):", dim(fredqd_lags_df_alinhado), "\n")
+cat("Dimensões S_t (MAFs):", dim(mafs_df), "\n")
+
+# Finalmente, combinar tudo no vetor de estado S_t
+# A ordem segue a Tabela 1 (embora a ordem exata não importa para o Random Forest, 
+# é uma boa prática manter organizado)
+St <- bind_cols(
+  y_lags_df,               # 1. Oito defasagens de y_t
+  trend_df_alinhado,       # 2. t
+  fredqd_lags_df_alinhado, # 3. Duas defasagens de cada variável
+  fatores_lags_df,         # 4. Oito defasagens dos 5 fatores F
+  mafs_df                  # 5. Dois MAFs para cada variável j
+)
+
+cat("\nDimensões finais do S_t:", dim(St), "\n")
+cat("Visualização do S_t finalizado:\n")
+View(St)
+sum(is.na(St))
+
