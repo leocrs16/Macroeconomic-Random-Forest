@@ -8,7 +8,7 @@ Este repositório contém o código R para replicar e estender o modelo Macroeco
 - Interpretabilidade: Ao contrário de muitas abordagens puras de ML, o MRF é diretamente interpretável através de seus GTVPs.
 - Ganho Preditivo: O modelo demonstra ganhos de previsão, notavelmente na previsão da drástica alta no desemprego em 2008.
 
-#Engenharia de Recursos (St):
+# Engenharia de Recursos (St): 
 O sucesso do MRF depende criticamente do seu vetor de estado (St), um conjunto rico de features que impulsiona o componente Random Forest. O código implementa todas as etapas de engenharia de recursos para a construção do St:
 - Fatores PCA Tradicionais: Compressão de dados cross-sectional das 248 séries macroeconômicas.
 - Moving Average Factors (MAFs): Fatores de componentes principais aplicados sobre as defasagens de cada variável, projetados para comprimir a informação do polinômio de defasagem e aumentar o poder preditivo.
